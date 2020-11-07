@@ -2,6 +2,8 @@
 
 set -ex
 
+export RUST_LOG="info"
+
 cargo build
 sudo ip netns exec R \
   ./target/debug/mdns-repeater net0 net1 net2
