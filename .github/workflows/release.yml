@@ -28,7 +28,7 @@ jobs:
           args: --release --target ${{ matrix.target.name }}
       - name: Zip
         run: |
-          zip --junk-paths mdns-repeater-${{ github.ref }}-${{ metrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
+          zip --junk-paths mdns-repeater-${{ github.ref }}-${{ matrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
