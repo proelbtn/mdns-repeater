@@ -14,7 +14,7 @@ use clap::{App, Arg};
 use log::{info, trace};
 use nix::sys::epoll::*;
 use nix::sys::socket::*;
-use nix::sys::socket::sockopt::{BindToDevice, IpAddMembership};
+use nix::sys::socket::sockopt::{BindToDevice, IpAddMembership, IpMulticastLoop};
 use serde::{Serialize, Deserialize};
 
 const ARGS_CONFIG_FILE: &'static str = "CONFIG";
@@ -47,15 +47,6 @@ impl Interface {
 
         setsockopt(fd, BindToDevice, &OsString::from(&config.name))?;
 
-        let recvaddr = SockAddr::new_inet(
-            InetAddr::new(IpAddr::new_v4(224, 0, 0, 251), 5353));
-        bind(fd, &recvaddr)?;
-
-        let maddr = Ipv4Addr::new(224, 0, 0, 251);
-        let ifaddr = Ipv4Addr::from_std(&config.address.parse()?);
-        let ip_mreq = IpMembershipRequest::new(maddr, Some(ifaddr));
-        setsockopt(fd, IpAddMembership, &ip_mreq)?;
-
         Ok(Interface {
             name: config.name.clone(),
             sockfd: fd,
@@ -86,6 +77,30 @@ fn load_config(config_file: &str) -> Result<Box<GlobalConfig>> {
     Ok(Box::new(config))
 }
 
+fn setup_receive_socket(config: Box<GlobalConfig>) -> Result<RawFd> {
+    let family = AddressFamily::Inet;
+    let socktype = SockType::Datagram;
+    let flag = SockFlag::empty();
+    let proto = SockProtocol::Udp;
+
+    let fd = socket(family, socktype, flag, proto)?;
+
+    let recvaddr = SockAddr::new_inet(
+        InetAddr::new(IpAddr::new_v4(0, 0, 0, 0), 5353));
+    bind(fd, &recvaddr)?;
+
+    setsockopt(fd, IpMulticastLoop, &true)?;
+
+    for interface in config.interfaces {
+        let maddr = Ipv4Addr::new(224, 0, 0, 251);
+        let ifaddr = Ipv4Addr::from_std(&interface.address.parse()?);
+        let ip_mreq = IpMembershipRequest::new(maddr, Some(ifaddr));
+        setsockopt(fd, IpAddMembership, &ip_mreq)?;
+    }
+
+    Ok(fd)
+}
+
 fn start(config: Box<GlobalConfig>) -> Result<()> {
     info!("Setting up interfaces...");
     let mut interfaces = Vec::new();
@@ -95,20 +110,20 @@ fn start(config: Box<GlobalConfig>) -> Result<()> {
         interfaces.push(interface);
     }
 
+    info!("Setting up receive socket...");
+    let recvfd = setup_receive_socket(config)?;
+
     info!("Setting up epoll...");
     let epoll_fd = epoll_create()?;
-    let mut epoll_events = vec![EpollEvent::empty(); 1024];
-    for interface in &interfaces {
-        let sockfd = interface.sockfd;
-        let mut event = EpollEvent::new(EpollFlags::EPOLLIN, sockfd as u64);
-        epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, sockfd, &mut event)?;
-    }
+    let mut epoll_events = vec![EpollEvent::empty(); 16];
+    let mut event = EpollEvent::new(EpollFlags::EPOLLIN, recvfd as u64);
+    epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, recvfd, &mut event)?;
 
     info!("Starting poll...");
     let dst = SockAddr::new_inet(
         InetAddr::new(IpAddr::new_v4(224, 0, 0, 251), 5353));
-    for _ in 0..3 {
-        let num = epoll_wait(epoll_fd, &mut epoll_events, -1)?;
+    loop {
+        let num = epoll_wait(epoll_fd, &mut epoll_events, 100)?;
 
         for i in 0..num {
             let mut buf: [u8; 4096] = [0; 4096];
@@ -118,10 +133,8 @@ fn start(config: Box<GlobalConfig>) -> Result<()> {
             trace!("Received mdns packets from {}", sockfd);
 
             for interface in &interfaces {
-                if interface.sockfd != sockfd {
-                    trace!("Sending Multicast DNS packets to {}", interface.sockfd);
-                    sendto(interface.sockfd, &buf[0..len], &dst, MsgFlags::empty())?;
-                }
+                trace!("Sending Multicast DNS packets to {}", interface.sockfd);
+                sendto(interface.sockfd, &buf[0..len], &dst, MsgFlags::empty())?;
             }
         }
     };
