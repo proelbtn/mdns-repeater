@@ -1,0 +1,50 @@
+name: release
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+jobs:
+  release:
+    strategy:
+      matrix:
+        target:
+          - name: x86_64-unknown-linux-musl
+            short: linux-amd64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+        with:
+          fetch-depth: 1
+      - name: Install toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          target: x86_64-unknown-linux-musl
+          override: true
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target.name }}
+      - name: Zip
+        run: |
+          zip --junk-paths mdns-repeater-${{ github.ref }}-${{ metrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+      - name: Upload Release Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./mdns-repeater-${{ github.ref }}-${{ metrix.target.short }}.zip
+          asset_name: mdns-repeater-${{ github.ref }}-${{ metrix.target.short }}.zip
+          asset_content_type: application/zip
