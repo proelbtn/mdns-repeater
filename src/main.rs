@@ -23,6 +23,7 @@ const ARGS_CONFIG_FILE: &'static str = "CONFIG";
 struct InterfaceConfig {
     name: String,
     address: String,
+    netmask: String,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
@@ -33,11 +34,16 @@ struct GlobalConfig {
 #[derive(Debug)]
 struct Interface {
     name: String,
+    address: std::net::IpAddr,
+    netmask: std::net::IpAddr,
     sockfd: RawFd,
 }
 
 impl Interface {
     fn new(config: &InterfaceConfig) -> Result<Self> {
+        let address: std::net::IpAddr = config.address.parse()?;
+        let netmask: std::net::IpAddr = config.netmask.parse()?;
+
         let family = AddressFamily::Inet;
         let socktype = SockType::Datagram;
         let flag = SockFlag::empty();
@@ -49,8 +55,61 @@ impl Interface {
 
         Ok(Interface {
             name: config.name.clone(),
+            address: address,
+            netmask: netmask,
             sockfd: fd,
         })
+    }
+
+    fn has(&self, addr: std::net::IpAddr) -> bool {
+        return self.address == addr
+    }
+}
+
+fn is_same_network_v4(
+    addr: std::net::Ipv4Addr,
+    ifaddr: std::net::Ipv4Addr,
+    mask: std::net::Ipv4Addr) -> bool {
+    for i in 0..3 {
+        if addr.octets()[i] & mask.octets()[i] 
+            != ifaddr.octets()[i] & mask.octets()[i] {
+            return false;
+        }
+    };
+    return true;
+}
+
+fn is_same_network_v6(
+    addr: std::net::Ipv6Addr,
+    ifaddr: std::net::Ipv6Addr,
+    mask: std::net::Ipv6Addr) -> bool {
+    for i in 0..15 {
+        if addr.octets()[i] & mask.octets()[i] 
+            != ifaddr.octets()[i] & mask.octets()[i] {
+            return false;
+        }
+    };
+    return true;
+}
+
+fn is_same_network(interface: &Interface, address: std::net::IpAddr)-> bool {
+    match interface.address {
+        std::net::IpAddr::V4(ifaddr) => match interface.netmask {
+            std::net::IpAddr::V4(mask) => match address {
+                std::net::IpAddr::V4(addr) =>
+                    return is_same_network_v4(addr, ifaddr, mask),
+                _ => return false
+            },
+            _ => return false
+        },
+        std::net::IpAddr::V6(ifaddr) => match interface.netmask {
+            std::net::IpAddr::V6(mask) => match address {
+                std::net::IpAddr::V6(addr) =>
+                    return is_same_network_v6(addr, ifaddr, mask),
+                _ => return false
+            },
+            _ => return false
+        },
     }
 }
 
@@ -125,16 +184,27 @@ fn start(config: Box<GlobalConfig>) -> Result<()> {
     loop {
         let num = epoll_wait(epoll_fd, &mut epoll_events, 100)?;
 
-        for i in 0..num {
+        'events: for i in 0..num {
             let mut buf: [u8; 4096] = [0; 4096];
 
             let sockfd = epoll_events[i].data() as RawFd;
-            let len = recv(sockfd, &mut buf, MsgFlags::empty())?;
-            trace!("Received mdns packets from {}", sockfd);
+            let (len, addr) = recvfrom(sockfd, &mut buf)?;
 
-            for interface in &interfaces {
-                trace!("Sending Multicast DNS packets to {}", interface.sockfd);
-                sendto(interface.sockfd, &buf[0..len], &dst, MsgFlags::empty())?;
+            if let Some(SockAddr::Inet(addr)) = addr {
+                let addr = addr.ip().to_std();
+                for interface in &interfaces {
+                    if interface.has(addr) {
+                        continue 'events;
+                    }
+                }
+
+                trace!("Received mdns packets from {:?} (sockfd: {})", addr, sockfd);
+                for interface in &interfaces {
+                    if !is_same_network(interface, addr) {
+                        trace!("Sending Multicast DNS packets to {}", interface.sockfd);
+                        sendto(interface.sockfd, &buf[0..len], &dst, MsgFlags::empty())?;
+                    }
+                }
             }
         }
     };
