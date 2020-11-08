@@ -12,6 +12,9 @@ jobs:
             short: linux-amd64
     runs-on: ubuntu-latest
     steps:
+    - name: Extract Tag Name
+        run: |
+          echo "::set-env name=TAG::${GITHUB_REF#refs/tags/}"
       - name: Checkout
         uses: actions/checkout@v2
         with:
@@ -49,7 +52,7 @@ jobs:
           args: --release --target ${{ matrix.target.name }}
       - name: Zip
         run: |
-          zip --junk-paths mdns-repeater-${{ matrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
+          zip --junk-paths mdns-repeater-${{TAG}}-${{ matrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -66,6 +69,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mdns-repeater-${{ github.ref }}-${{ matrix.target.short }}.zip
-          asset_name: mdns-repeater-${{ github.ref }}-${{ matrix.target.short }}.zip
+          asset_path: ./mdns-repeater-${{TAG}}-${{ matrix.target.short }}.zip
+          asset_name: mdns-repeater-${{TAG}}-${{ matrix.target.short }}.zip
           asset_content_type: application/zip
