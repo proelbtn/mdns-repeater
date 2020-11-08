@@ -1,0 +1,5 @@
+interfaces:
+  - name: net0
+    address: 10.0.0.254
+  - name: net1
+    address: 10.0.1.254

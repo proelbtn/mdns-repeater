@@ -1,55 +1,64 @@
+extern crate anyhow;
 #[macro_use]
 extern crate clap;
 extern crate log;
 extern crate nix;
+extern crate serde;
 
 use std::env;
 use std::ffi::OsString;
 use std::os::unix::io::RawFd;
 
+use anyhow::Result;
 use clap::{App, Arg};
-use log::info;
+use log::{info, trace};
 use nix::sys::epoll::*;
 use nix::sys::socket::*;
-use nix::sys::socket::sockopt::BindToDevice;
+use nix::sys::socket::sockopt::{BindToDevice, IpAddMembership};
+use serde::{Serialize, Deserialize};
 
-const ARGS_INTERFACES: &'static str = "INTERFACES";
+const ARGS_CONFIG_FILE: &'static str = "CONFIG";
 
-#[derive(Debug)]
-struct SocketPair {
-    recv: RawFd,
-    send: RawFd,
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct InterfaceConfig {
+    name: String,
+    address: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+struct GlobalConfig {
+    interfaces: Vec<InterfaceConfig>,
 }
 
 #[derive(Debug)]
 struct Interface {
     name: String,
-    sockpair: SocketPair,
+    sockfd: RawFd,
 }
 
 impl Interface {
-    fn new(name: &str) -> nix::Result<Self> {
+    fn new(config: &InterfaceConfig) -> Result<Self> {
         let family = AddressFamily::Inet;
         let socktype = SockType::Datagram;
         let flag = SockFlag::empty();
         let proto = SockProtocol::Udp;
 
-        let recvfd = socket(family, socktype, flag, proto)?;
-        let sendfd = socket(family, socktype, flag, proto)?;
+        let fd = socket(family, socktype, flag, proto)?;
 
-        setsockopt(recvfd, BindToDevice, &OsString::from(name))?;
-        setsockopt(sendfd, BindToDevice, &OsString::from(name))?;
+        setsockopt(fd, BindToDevice, &OsString::from(&config.name))?;
 
         let recvaddr = SockAddr::new_inet(
-            InetAddr::new(IpAddr::new_v4(0, 0, 0, 0), 5353));
-        bind(recvfd, &recvaddr)?;
+            InetAddr::new(IpAddr::new_v4(224, 0, 0, 251), 5353));
+        bind(fd, &recvaddr)?;
+
+        let maddr = Ipv4Addr::new(224, 0, 0, 251);
+        let ifaddr = Ipv4Addr::from_std(&config.address.parse()?);
+        let ip_mreq = IpMembershipRequest::new(maddr, Some(ifaddr));
+        setsockopt(fd, IpAddMembership, &ip_mreq)?;
 
         Ok(Interface {
-            name: String::from(name),
-            sockpair: SocketPair {
-                recv: recvfd,
-                send: sendfd,
-            }
+            name: config.name.clone(),
+            sockfd: fd,
         })
     }
 }
@@ -63,54 +72,73 @@ fn setup_app<'a, 'b>() -> App<'a, 'b> {
         .version(version)
         .author(author)
         .about(description)
-        .arg(Arg::with_name(ARGS_INTERFACES)
-            .help("Interface names where mdns-repeater works")
-            .required(true)
-            .multiple(true))
+        .arg(Arg::with_name(ARGS_CONFIG_FILE)
+            .short("f")
+            .long("config-file")
+            .default_value("config.yaml")
+            .help("Config file")
+            .required(true))
 }
 
-fn start() -> nix::Result<()> {
-    let matches = setup_app().get_matches();
-    let ifnames = matches.values_of(ARGS_INTERFACES).unwrap();
+fn load_config(config_file: &str) -> Result<Box<GlobalConfig>> {
+    let config = std::fs::read_to_string(config_file)?;
+    let config: GlobalConfig = serde_yaml::from_str(&config)?;
+    Ok(Box::new(config))
+}
 
+fn start(config: Box<GlobalConfig>) -> Result<()> {
     info!("Setting up interfaces...");
     let mut interfaces = Vec::new();
-    for ifname in ifnames {
-        let interface = Interface::new(ifname)?;
+    for interface in &config.interfaces {
+        let interface = Interface::new(interface)?;
+        trace!("Added interface: {:?}", interface);
         interfaces.push(interface);
     }
 
+    info!("Setting up epoll...");
     let epoll_fd = epoll_create()?;
     let mut epoll_events = vec![EpollEvent::empty(); 1024];
-
     for interface in &interfaces {
-        let sockfd = interface.sockpair.recv;
+        let sockfd = interface.sockfd;
         let mut event = EpollEvent::new(EpollFlags::EPOLLIN, sockfd as u64);
         epoll_ctl(epoll_fd, EpollOp::EpollCtlAdd, sockfd, &mut event)?;
     }
 
     info!("Starting poll...");
-    loop {
-        println!("test");
+    let dst = SockAddr::new_inet(
+        InetAddr::new(IpAddr::new_v4(224, 0, 0, 251), 5353));
+    for _ in 0..3 {
         let num = epoll_wait(epoll_fd, &mut epoll_events, -1)?;
 
         for i in 0..num {
             let mut buf: [u8; 4096] = [0; 4096];
 
             let sockfd = epoll_events[i].data() as RawFd;
-            recv(sockfd, &mut buf, MsgFlags::empty())?;
+            let len = recv(sockfd, &mut buf, MsgFlags::empty())?;
+            trace!("Received mdns packets from {}", sockfd);
 
             for interface in &interfaces {
-                if interface.sockpair.recv != sockfd {
-                    send(interface.sockpair.send, &buf, MsgFlags::empty())?;
+                if interface.sockfd != sockfd {
+                    trace!("Sending Multicast DNS packets to {}", interface.sockfd);
+                    sendto(interface.sockfd, &buf[0..len], &dst, MsgFlags::empty())?;
                 }
             }
         }
-    }
+    };
+    Ok(())
 }
 
-fn main() {
-    env::set_var("RUST_LOG", env!("RUST_LOG"));
+fn main() -> Result<()> {
+    env::set_var("RUST_LOG", "trace");
     env_logger::init();
-    start().unwrap();
+
+    // parse config and load config
+    let matches = setup_app().get_matches();
+    let config_file: &str = matches.value_of(ARGS_CONFIG_FILE).unwrap();
+    let config = load_config(config_file)?;
+
+    // start 
+    start(config)?;
+
+    Ok(())
 }
