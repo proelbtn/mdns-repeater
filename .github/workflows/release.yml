@@ -5,13 +5,11 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
 jobs:
   release:
-    strategy:
-      matrix:
-        target:
-          - name: x86_64-unknown-linux-musl
-            short: linux-amd64
     runs-on: ubuntu-latest
     steps:
+      - name: Extract Tag Name
+        run: |
+          echo "::set-env name=TAG::${GITHUB_REF#refs/tags/}"
       - name: Checkout
         uses: actions/checkout@v2
         with:
@@ -22,21 +20,21 @@ jobs:
           cache-name: cache-registry-index
         with:
           path: ~/.cargo/registry/index
-          key: ${{ matrix.target.short }}-${{ hashFiles('**/Cargo.lock') }}
+          key: x86_64-unknown-linux-musl-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache ~/.cargo/registry/cache
         uses: actions/cache@v2
         env:
           cache-name: cache-registry-cache
         with:
           path: ~/.cargo/registry/cache
-          key: ${{ matrix.target.short }}-${{ hashFiles('**/Cargo.lock') }}
+          key: x86_64-unknown-linux-musl-${{ hashFiles('**/Cargo.lock') }}
       - name: Cache ./target
         uses: actions/cache@v2
         env:
           cache-name: cache-registry-target
         with:
           path: ./target
-          key: ${{ matrix.target.short }}-${{ hashFiles('**/Cargo.lock') }}
+          key: x86_64-unknown-linux-musl-${{ hashFiles('**/Cargo.lock') }}
       - name: Install toolchain
         uses: actions-rs/toolchain@v1
         with:
@@ -46,10 +44,10 @@ jobs:
         uses: actions-rs/cargo@v1
         with:
           command: build
-          args: --release --target ${{ matrix.target.name }}
+          args: --release --target x86_64-unknown-linux-musl
       - name: Zip
         run: |
-          zip --junk-paths mdns-repeater-${{ matrix.target.short }} target/${{ matrix.target.name }}/release/mdns-repeater
+          zip --junk-paths mdns-repeater-${{TAG}}-linux-amd64 target/x86_64-unknown-linux-musl/release/mdns-repeater
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
@@ -66,6 +64,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./mdns-repeater-${{ matrix.target.short }}.zip
-          asset_name: mdns-repeater-${{ github.ref }}-${{ matrix.target.short }}.zip
+
+          asset_path: ./mdns-repeater-${{TAG}}-linux-amd64.zip
+          asset_name: mdns-repeater-${{TAG}}-linux-amd64.zip
           asset_content_type: application/zip
